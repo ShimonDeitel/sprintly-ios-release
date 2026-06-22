@@ -1,137 +1,192 @@
 import SwiftUI
-import Charts
+import SwiftData
 
+/// Primary sprint tracking screen — shows the current week's goal and daily progress dots.
 struct GridView: View {
     @EnvironmentObject var appModel: AppModel
+    @EnvironmentObject var store: Store
 
-    @State private var sliderValue: Double = 5
-    @State private var logged = false
-
-    private var chartEntries: [WaveEntry] {
-        Array(appModel.recentEntries.reversed())
-    }
+    private let dayLabels = ["M", "T", "W", "T", "F", "S", "S"]
 
     var body: some View {
+        if let sprint = appModel.currentSprint {
+            sprintContent(sprint: sprint)
+        }
+    }
+
+    @ViewBuilder
+    private func sprintContent(sprint: Sprint) -> some View {
         VStack(spacing: 20) {
-            // Wave chart
-            if chartEntries.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "waveform")
-                        .font(.system(size: 44))
-                        .foregroundStyle(Color.qmAccent.opacity(0.4))
-                    Text("Log your first energy level below")
-                        .font(.subheadline)
+            // Goal title card
+            VStack(spacing: 8) {
+                Text("Sprint Goal")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(sprint.goalTitle)
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(3)
+            }
+            .qmCard()
+            .padding(.horizontal)
+
+            // Progress bar
+            VStack(spacing: 8) {
+                HStack {
+                    Text("Progress")
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+                    Spacer()
+                    Text("\(sprint.daysLogged) / \(sprint.targetCount) days")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.qmAccent)
                 }
-                .frame(height: 140)
-                .frame(maxWidth: .infinity)
-            } else {
-                Chart {
-                    ForEach(Array(chartEntries.enumerated()), id: \.offset) { idx, entry in
-                        AreaMark(
-                            x: .value("Day", idx),
-                            yStart: .value("Base", 0),
-                            yEnd: .value("Level", entry.level)
-                        )
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [Color.qmAccent.opacity(0.25), Color.qmAccent.opacity(0.05)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .interpolationMethod(.catmullRom)
-
-                        LineMark(
-                            x: .value("Day", idx),
-                            y: .value("Level", entry.level)
-                        )
-                        .foregroundStyle(Color.qmAccent)
-                        .lineStyle(StrokeStyle(lineWidth: 2.5))
-                        .interpolationMethod(.catmullRom)
-
-                        PointMark(
-                            x: .value("Day", idx),
-                            y: .value("Level", entry.level)
-                        )
-                        .foregroundStyle(Color.qmAccent)
-                        .symbolSize(36)
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.qmCard)
+                            .frame(height: 14)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(progressColor(sprint: sprint))
+                            .frame(width: max(0, geo.size.width * CGFloat(sprint.hitRate)), height: 14)
+                            .animation(.spring(response: 0.4), value: sprint.hitRate)
                     }
                 }
-                .chartYScale(domain: 0...10)
-                .chartXAxis(.hidden)
-                .chartYAxis {
-                    AxisMarks(values: [0, 5, 10]) { value in
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4]))
-                            .foregroundStyle(Color.qmHair)
-                        AxisValueLabel {
-                            if let v = value.as(Int.self) {
-                                Text("\(v)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
+                .frame(height: 14)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 12)
+            .background(Color.qmCard, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(.horizontal)
+
+            // Day dots grid
+            VStack(spacing: 12) {
+                Text("Tap today to mark progress")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                let weekDays = weekDates(for: sprint)
+                HStack(spacing: 8) {
+                    ForEach(0..<7, id: \.self) { idx in
+                        let day = weekDays[idx]
+                        let label = dayLabels[idx]
+                        DayDot(
+                            label: label,
+                            date: day,
+                            isLogged: isLogged(sprint: sprint, date: day),
+                            isToday: Calendar.current.isDateInToday(day),
+                            isPast: day < Calendar.current.startOfDay(for: Date())
+                        ) {
+                            guard Calendar.current.isDateInToday(day) else { return }
+                            Haptics.tap()
+                            appModel.toggleToday()
                         }
                     }
                 }
-                .frame(height: 140)
+                .frame(maxWidth: .infinity)
             }
+            .padding()
+            .background(Color.qmCard, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(.horizontal)
 
-            // Divider
-            Divider()
-
-            // Log energy section
-            VStack(spacing: 12) {
-                HStack {
-                    Text("Energy level")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(Int(sliderValue.rounded()))")
-                        .font(.title2.weight(.bold))
-                        .foregroundStyle(Color.qmAccent)
-                        .monospacedDigit()
-                        .frame(width: 32)
+            // Main CTA — log today
+            let todayDone = appModel.todayLogged()
+            Button {
+                Haptics.success()
+                appModel.toggleToday()
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: todayDone ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                    Text(todayDone ? "Today logged!" : "Mark today as done")
+                        .font(.headline.weight(.semibold))
                 }
+                .frame(maxWidth: .infinity)
+            }
+            .prominentButton()
+            .padding(.horizontal)
+            .opacity(sprint.completed ? 0.6 : 1)
 
-                Slider(value: $sliderValue, in: 0...10, step: 1)
-                    .tint(Color.qmAccent)
-                    .onChange(of: sliderValue) { _, _ in
-                        Haptics.tap()
-                        logged = false
-                    }
-
-                HStack {
-                    Text("Low")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("High")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            if sprint.completed {
+                HStack(spacing: 6) {
+                    Image(systemName: "flag.checkered.2.crossed")
+                        .foregroundStyle(Color.qmCorrect)
+                    Text("Sprint complete! Great week.")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.qmCorrect)
                 }
-
-                Button {
-                    appModel.logEnergy(level: Int(sliderValue.rounded()))
-                    Haptics.success()
-                    logged = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: logged ? "checkmark" : "waveform.path")
-                        Text(logged ? "Logged" : "Log Today's Energy")
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .prominentButton()
-                .disabled(logged)
-                .animation(.easeInOut(duration: 0.2), value: logged)
+                .padding(.top, 4)
             }
         }
-        .qmCard()
-        .onAppear {
-            if let today = appModel.todayEntry {
-                sliderValue = Double(today.level)
-                logged = true
+    }
+
+    // MARK: - Helpers
+
+    private func progressColor(sprint: Sprint) -> Color {
+        if sprint.completed { return Color.qmCorrect }
+        return Color.qmAccent
+    }
+
+    private func weekDates(for sprint: Sprint) -> [Date] {
+        let start = AppModel.weekStart(for: sprint.weekStart)
+        return (0..<7).compactMap { offset in
+            Calendar.current.date(byAdding: .day, value: offset, to: start)
+        }
+    }
+
+    private func isLogged(sprint: Sprint, date: Date) -> Bool {
+        let startOfDay = Calendar.current.startOfDay(for: date)
+        return sprint.logs.first(where: {
+            Calendar.current.startOfDay(for: $0.date) == startOfDay
+        })?.progressMade == true
+    }
+}
+
+// MARK: - DayDot
+
+private struct DayDot: View {
+    let label: String
+    let date: Date
+    let isLogged: Bool
+    let isToday: Bool
+    let isPast: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Text(label)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(isToday ? Color.qmAccent : .secondary)
+                ZStack {
+                    Circle()
+                        .fill(isLogged ? Color.qmAccent : (isPast ? Color.qmCard2 : Color.qmCard2))
+                        .frame(width: 36, height: 36)
+                    if isLogged {
+                        Image(systemName: "checkmark")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                    }
+                    if isToday && !isLogged {
+                        Circle()
+                            .strokeBorder(Color.qmAccent, lineWidth: 2)
+                            .frame(width: 36, height: 36)
+                    }
+                }
+                Text(dayNum(date))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func dayNum(_ date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "d"
+        return fmt.string(from: date)
     }
 }

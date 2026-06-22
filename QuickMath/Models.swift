@@ -1,35 +1,62 @@
-import Foundation
+import SwiftUI
 import SwiftData
 
 // MARK: - SwiftData models
 
 @Model
-final class WaveEntry {
+final class Sprint {
+    var id: UUID
+    var weekStart: Date
+    var goalTitle: String
+    var targetCount: Int
+    @Relationship(deleteRule: .cascade) var logs: [DayLog]
+
+    init(id: UUID = UUID(), weekStart: Date, goalTitle: String, targetCount: Int = 7) {
+        self.id = id
+        self.weekStart = weekStart
+        self.goalTitle = goalTitle
+        self.targetCount = targetCount
+        self.logs = []
+    }
+
+    var hitRate: Double {
+        guard targetCount > 0 else { return 0 }
+        let hits = logs.filter { $0.progressMade }.count
+        return Double(hits) / Double(targetCount)
+    }
+
+    var completed: Bool { hitRate >= 1.0 }
+
+    var daysLogged: Int { logs.filter { $0.progressMade }.count }
+}
+
+@Model
+final class DayLog {
     var id: UUID
     var date: Date
-    var level: Int
-    var partOfDay: String
-    var tag: String?
+    var progressMade: Bool
+    var note: String
 
-    init(id: UUID = UUID(), date: Date = .now, level: Int, partOfDay: String = "day", tag: String? = nil) {
+    init(id: UUID = UUID(), date: Date, progressMade: Bool, note: String = "") {
         self.id = id
         self.date = date
-        self.level = level
-        self.partOfDay = partOfDay
-        self.tag = tag
+        self.progressMade = progressMade
+        self.note = note
     }
 }
 
 @Model
-final class TrendCache {
+final class SprintStat {
     var id: UUID
     var weekStart: Date
-    var average: Double
+    var completed: Bool
+    var hitRate: Double
 
-    init(id: UUID = UUID(), weekStart: Date, average: Double) {
+    init(id: UUID = UUID(), weekStart: Date, completed: Bool, hitRate: Double) {
         self.id = id
         self.weekStart = weekStart
-        self.average = average
+        self.completed = completed
+        self.hitRate = hitRate
     }
 }
 
@@ -40,9 +67,8 @@ final class AppModel: ObservableObject {
     let container: ModelContainer
     weak var store: Store?
 
-    @Published private(set) var recentEntries: [WaveEntry] = []
-    @Published private(set) var todayEntry: WaveEntry? = nil
-    @Published private(set) var allEntries: [WaveEntry] = []
+    @Published private(set) var currentSprint: Sprint?
+    @Published private(set) var pastSprints: [Sprint] = []
 
     init(container: ModelContainer) {
         self.container = container
@@ -50,79 +76,106 @@ final class AppModel: ObservableObject {
     }
 
     static func makeContainer() -> ModelContainer {
-        let schema = Schema([WaveEntry.self, TrendCache.self])
+        let schema = Schema([Sprint.self, DayLog.self, SprintStat.self])
+        let config = ModelConfiguration("sprintly", schema: schema, isStoredInMemoryOnly: false)
         do {
-            let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
             return try ModelContainer(for: schema, configurations: [config])
         } catch {
             let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-            return try! ModelContainer(for: schema, configurations: [fallback])
+            return (try? ModelContainer(for: schema, configurations: [fallback]))!
         }
     }
 
     func reload() {
         let ctx = container.mainContext
-        let descriptor = FetchDescriptor<WaveEntry>(sortBy: [SortDescriptor(\.date, order: .reverse)])
-        let fetched = (try? ctx.fetch(descriptor)) ?? []
-        allEntries = fetched
-        recentEntries = Array(fetched.prefix(7))
-        todayEntry = fetched.first(where: { Calendar.current.isDateInToday($0.date) })
+        let allSprints = (try? ctx.fetch(FetchDescriptor<Sprint>(sortBy: [SortDescriptor(\.weekStart, order: .reverse)]))) ?? []
+        let todayWeekStart = Self.weekStart(for: Date())
+        currentSprint = allSprints.first(where: { Self.weekStart(for: $0.weekStart) == todayWeekStart })
+        pastSprints = allSprints.filter { Self.weekStart(for: $0.weekStart) != todayWeekStart }
     }
 
     func refresh() { reload() }
 
-    // MARK: Log energy level
-    func logEnergy(level: Int, partOfDay: String = "day", tag: String? = nil) {
+    // MARK: - Sprint creation
+
+    func createOrUpdateSprint(goalTitle: String, targetCount: Int = 7) {
         let ctx = container.mainContext
-        // Replace existing today entry if same partOfDay
-        if let existing = allEntries.first(where: {
-            Calendar.current.isDateInToday($0.date) && $0.partOfDay == partOfDay
-        }) {
-            existing.level = level
-            existing.tag = tag
+        let todayWeekStart = Self.weekStart(for: Date())
+        if let existing = currentSprint {
+            existing.goalTitle = goalTitle
+            existing.targetCount = targetCount
         } else {
-            let entry = WaveEntry(level: level, partOfDay: partOfDay, tag: tag)
-            ctx.insert(entry)
+            let sprint = Sprint(weekStart: todayWeekStart, goalTitle: goalTitle, targetCount: targetCount)
+            ctx.insert(sprint)
         }
         try? ctx.save()
         reload()
     }
 
-    // MARK: 7-day rolling average
-    var sevenDayAverage: Double {
-        let relevant = recentEntries.prefix(7)
-        guard !relevant.isEmpty else { return 0 }
-        return Double(relevant.map(\.level).reduce(0, +)) / Double(relevant.count)
+    func toggleToday() {
+        guard let sprint = currentSprint else { return }
+        let ctx = container.mainContext
+        let today = Calendar.current.startOfDay(for: Date())
+        if let existing = sprint.logs.first(where: { Calendar.current.startOfDay(for: $0.date) == today }) {
+            existing.progressMade.toggle()
+        } else {
+            let log = DayLog(date: today, progressMade: true)
+            ctx.insert(log)
+            sprint.logs.append(log)
+        }
+        try? ctx.save()
+        reload()
     }
 
-    // MARK: Best time of day (pro)
-    var bestTimeOfDay: String {
-        let mornings = allEntries.filter { $0.partOfDay == "morning" }
-        let evenings = allEntries.filter { $0.partOfDay == "evening" }
-        let morningAvg = mornings.isEmpty ? 0.0 : Double(mornings.map(\.level).reduce(0, +)) / Double(mornings.count)
-        let eveningAvg = evenings.isEmpty ? 0.0 : Double(evenings.map(\.level).reduce(0, +)) / Double(evenings.count)
-        if morningAvg == 0 && eveningAvg == 0 { return "Not enough data" }
-        if morningAvg >= eveningAvg { return "Morning" }
-        return "Evening"
+    func todayLogged() -> Bool {
+        guard let sprint = currentSprint else { return false }
+        let today = Calendar.current.startOfDay(for: Date())
+        return sprint.logs.first(where: { Calendar.current.startOfDay(for: $0.date) == today })?.progressMade == true
     }
 
-    // MARK: Current streak
+    // MARK: - Stats helpers
+
+    var overallWinRate: Double {
+        let all = pastSprints + (currentSprint.map { [$0] } ?? [])
+        guard !all.isEmpty else { return 0 }
+        let wins = all.filter { $0.completed }.count
+        return Double(wins) / Double(all.count)
+    }
+
     var currentStreak: Int {
+        let sorted = pastSprints.sorted { $0.weekStart > $1.weekStart }
         var streak = 0
-        var checkDate = Calendar.current.startOfDay(for: .now)
-        let daySet = Set(allEntries.map { Calendar.current.startOfDay(for: $0.date) })
-        while daySet.contains(checkDate) {
-            streak += 1
-            checkDate = Calendar.current.date(byAdding: .day, value: -1, to: checkDate)!
+        for s in sorted {
+            if s.completed { streak += 1 } else { break }
         }
         return streak
     }
 
+    // MARK: - Delete all
+
     func deleteAllData() {
         let ctx = container.mainContext
-        try? ctx.delete(model: WaveEntry.self)
-        try? ctx.delete(model: TrendCache.self)
+        try? ctx.delete(model: DayLog.self)
+        try? ctx.delete(model: SprintStat.self)
+        try? ctx.delete(model: Sprint.self)
         try? ctx.save()
         reload()
+    }
+
+    // MARK: - Utilities
+
+    static func weekStart(for date: Date) -> Date {
+        var cal = Calendar(identifier: .iso8601)
+        cal.firstWeekday = 2 // Monday
+        return cal.startOfWeek(for: date) ?? Calendar.current.startOfDay(for: date)
+    }
+}
+
+// MARK: - Calendar helper
+
+private extension Calendar {
+    func startOfWeek(for date: Date) -> Date? {
+        let comps = dateComponents([.yearForWeekOfYear, .weekOfYear], from: date)
+        return self.date(from: comps)
     }
 }
